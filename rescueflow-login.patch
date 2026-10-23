@@ -1,0 +1,1395 @@
+From 1562ccbd715b24be348e15ec268a94b7eff0d909 Mon Sep 17 00:00:00 2001
+From: RescueFlow Team <purvakadam9637@gmail.com>
+Date: Fri, 23 Oct 2026 09:25:48 +0000
+Subject: [PATCH] Add sign-in page with roles: admin, donor, rider, shelter
+ coordinator
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Tngb6Fq9NmcvLE8zsMv3X7
+---
+ README.md                          |  16 ++
+ src/App.jsx                        |  28 +++-
+ src/components/AlertPanel.jsx      |   9 +-
+ src/components/AssignmentTable.jsx |  41 +++++
+ src/components/BatchDetails.jsx    |  15 +-
+ src/components/DonationForm.jsx    |  10 +-
+ src/components/Header.jsx          |  59 +++++--
+ src/components/RiderCard.jsx       |  13 +-
+ src/components/ShelterCard.jsx     |   8 +-
+ src/components/Sidebar.jsx         |  14 +-
+ src/context/AuthContext.jsx        |  26 +++
+ src/index.css                      |  54 ++++++
+ src/pages/Dashboard.jsx            |  27 +--
+ src/pages/Donations.jsx            |  16 +-
+ src/pages/Login.jsx                | 253 +++++++++++++++++++++++++++++
+ src/pages/MyDeliveries.jsx         |  77 +++++++++
+ src/pages/Shelters.jsx             |   5 +-
+ src/services/authService.js        | 190 ++++++++++++++++++++++
+ 18 files changed, 805 insertions(+), 56 deletions(-)
+ create mode 100644 src/context/AuthContext.jsx
+ create mode 100644 src/pages/Login.jsx
+ create mode 100644 src/pages/MyDeliveries.jsx
+ create mode 100644 src/services/authService.js
+
+diff --git a/README.md b/README.md
+index 1ae8deb..0fed02e 100644
+--- a/README.md
++++ b/README.md
+@@ -34,6 +34,19 @@ When something goes wrong, it **recovers** instead of failing silently:
+ - **Ghost rider:** unacknowledged reservations time out, uncollected stock is released and reassigned. Collected cargo is never "released" back to stock.
+ - **Mid-route shelter change:** cargo already on the road is rerouted to the safest alternative shelter. If none exists, it is marked **At Risk** with an urgent alert — an unsafe delivery is never forced.
+ 
++## Sign-in and roles
++
++Everyone signs in before using the app. Each role sees only what it needs:
++
++| Role | Can do | Demo login |
++|---|---|---|
++| Operations admin | Everything: dispatch, riders, shelters, simulator, logs | `admin@rescueflow.org` / `admin123` |
++| Donor | List and manage their own donations | `donor@sunrise.org` / `donor123` |
++| Volunteer rider | See their own jobs; accept, pick up, deliver | `rider@rescueflow.org` / `rider123` |
++| Shelter coordinator | Update their shelter's demand, resources and status | `shelter@riverside.org` / `shelter123` |
++
++New donors, riders and shelter coordinators can create their own accounts from the sign-in page. Accounts are stored in the browser with hashed passwords — a prototype only; a real deployment would use a server-side login.
++
+ ## Features
+ 
+ - Operations dashboard: KPIs, live deliveries, donation table, rider availability, shelter demand, urgent alerts, recent events
+@@ -106,6 +119,8 @@ src/
+     scenarioService.js      failure simulator scenarios
+     storageService.js       LocalStorage save/load
+     logService.js           activity log + alerts
++  services/authService.js  sign-in, sign-up, roles and page permissions
++  context/AuthContext.jsx   who is signed in
+   context/AppContext.jsx    app state, auto-save, background checks, toasts, confirm dialogs
+   data/                     demo data and constants
+   utils/                    time and ID helpers
+@@ -118,6 +133,7 @@ scripts/test-engine.mjs     automated tests
+ - Rider mobile app with push notifications for acknowledgment
+ - Backend database and multi-user accounts for donors and shelters
+ - SMS/WhatsApp alerts for shelter coordinators
++- Server-side authentication (e.g. OAuth / hosted auth provider)
+ - Historical analytics on waste prevented
+ 
+ ## Note
+diff --git a/src/App.jsx b/src/App.jsx
+index d6a9761..35b4895 100644
+--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -1,8 +1,10 @@
+ import { useState } from 'react';
+ import { AppProvider, useApp } from './context/AppContext.jsx';
++import { AuthProvider, useAuth } from './context/AuthContext.jsx';
+ import Sidebar from './components/Sidebar.jsx';
+ import Header from './components/Header.jsx';
+ import { ConfirmDialog, Toasts } from './components/Toasts.jsx';
++import Login from './pages/Login.jsx';
+ import Dashboard from './pages/Dashboard.jsx';
+ import Donations from './pages/Donations.jsx';
+ import Riders from './pages/Riders.jsx';
+@@ -10,6 +12,8 @@ import Shelters from './pages/Shelters.jsx';
+ import DispatchCenter from './pages/DispatchCenter.jsx';
+ import FailureSimulator from './pages/FailureSimulator.jsx';
+ import ActivityLogs from './pages/ActivityLogs.jsx';
++import MyDeliveries from './pages/MyDeliveries.jsx';
++import { ROLES } from './services/authService.js';
+ 
+ const PAGES = {
+   overview: Dashboard,
+@@ -19,18 +23,32 @@ const PAGES = {
+   dispatch: DispatchCenter,
+   simulator: FailureSimulator,
+   logs: ActivityLogs,
++  mydeliveries: MyDeliveries,
+ };
+ 
+ function Shell() {
+   const { route } = useApp();
++  const { user, can } = useAuth();
+   const [menuOpen, setMenuOpen] = useState(false);
+-  const Page = PAGES[route.page] ?? Dashboard;
++
++  if (!user) {
++    return (
++      <>
++        <Login />
++        <Toasts />
++      </>
++    );
++  }
++
++  // Pages a role may not open fall back to that role's first page
++  const pageId = can(route.page) ? route.page : ROLES[user.role].pages[0];
++  const Page = PAGES[pageId] ?? Dashboard;
+   return (
+     <div className="app">
+       <Sidebar open={menuOpen} onNavigate={() => setMenuOpen(false)} />
+       <div className="main">
+-        <Header onMenu={() => setMenuOpen((o) => !o)} />
+-        <Page />
++        <Header onMenu={() => setMenuOpen((o) => !o)} pageId={pageId} />
++        <Page key={pageId} />
+       </div>
+       <Toasts />
+       <ConfirmDialog />
+@@ -41,7 +59,9 @@ function Shell() {
+ export default function App() {
+   return (
+     <AppProvider>
+-      <Shell />
++      <AuthProvider>
++        <Shell />
++      </AuthProvider>
+     </AppProvider>
+   );
+ }
+diff --git a/src/components/AlertPanel.jsx b/src/components/AlertPanel.jsx
+index 7a3bee7..3c9d12d 100644
+--- a/src/components/AlertPanel.jsx
++++ b/src/components/AlertPanel.jsx
+@@ -1,5 +1,6 @@
+ import { AlertOctagon, AlertTriangle, CheckCircle2, Clock, Send } from 'lucide-react';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import { batchBlockReason, remainingMins } from '../services/dispatchEngine.js';
+ import { formatDuration, timeAgo } from '../utils/timeUtils.js';
+ import { AssignmentActions } from './AssignmentTable.jsx';
+@@ -13,6 +14,8 @@ const AT_RISK_ACTIONS = [
+ 
+ export default function AlertPanel({ limit = 6 }) {
+   const { state, now, navigate, run } = useApp();
++  const { can } = useAuth();
++  const ops = can('dispatch');
+   const alerts = state.alerts.filter((a) => !a.resolved);
+   const expiring = state.batches
+     .filter((b) => !batchBlockReason(b, now) && remainingMins(b, now) <= 120)
+@@ -50,10 +53,10 @@ export default function AlertPanel({ limit = 6 }) {
+               )}
+               <div className="row wrap" style={{ marginTop: 8 }}>
+                 {a && a.status === 'At Risk' && <AssignmentActions a={a} />}
+-                {al.kind !== 'at-risk' && al.batchId && (
++                {ops && al.kind !== 'at-risk' && al.batchId && (
+                   <button className="btn btn-xs" onClick={() => navigate('dispatch', { batchId: al.batchId })}><Send size={12} /> Open in Dispatch</button>
+                 )}
+-                {al.kind !== 'at-risk' && (
++                {ops && al.kind !== 'at-risk' && (
+                   <button className="btn btn-xs btn-ghost" onClick={() => run((s, t) => { const x = s.alerts.find((y) => y.id === al.id); if (x) { x.resolved = true; x.resolvedAt = t; } })}>
+                     Dismiss
+                   </button>
+@@ -74,7 +77,7 @@ export default function AlertPanel({ limit = 6 }) {
+               <div className="strong" style={{ fontSize: 13.5 }}>{b.id} expires in {formatDuration(rem)}</div>
+               <div className="cell-sub">{b.qty.available} {b.unit} of {b.category.toLowerCase()} from {b.donor} not yet dispatched</div>
+             </div>
+-            <button className="btn btn-xs btn-primary" onClick={() => navigate('dispatch', { batchId: b.id })}><Send size={12} /> Dispatch</button>
++            {ops && <button className="btn btn-xs btn-primary" onClick={() => navigate('dispatch', { batchId: b.id })}><Send size={12} /> Dispatch</button>}
+           </div>
+         );
+       })}
+diff --git a/src/components/AssignmentTable.jsx b/src/components/AssignmentTable.jsx
+index afad020..0087a7f 100644
+--- a/src/components/AssignmentTable.jsx
++++ b/src/components/AssignmentTable.jsx
+@@ -1,5 +1,6 @@
+ import { CheckCheck, Flag, PackageCheck, RefreshCw, Timer, Trash2, Truck, XCircle } from 'lucide-react';
+ import { useApp, useAction } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import { getRider, getShelter, shelterLabel } from '../services/dispatchEngine.js';
+ import {
+   acknowledge,
+@@ -26,7 +27,10 @@ export function AckCountdown({ a, now }) {
+ export function AssignmentActions({ a }) {
+   const { state, confirm, toast, run } = useApp();
+   const act = useAction();
++  const { user } = useAuth();
+   const rider = getRider(state, a.riderId);
++  const isAdmin = user?.role === 'admin';
++  const isOwnJob = user?.role === 'rider' && user.riderId === a.riderId;
+ 
+   const doTimeout = async () => {
+     const ok = await confirm({
+@@ -52,6 +56,9 @@ export function AssignmentActions({ a }) {
+     if (ok) act((s, now) => resolveAtRisk(s, now, a.id, 'dispose'), { success: 'Cargo disposed', successMsg: 'Recorded for food-safety audit; rider released' });
+   };
+ 
++  if (!isAdmin && !isOwnJob) return <span className="cell-sub">View only</span>;
++  if (!isAdmin) return <RiderActions a={a} rider={rider} act={act} />;
++
+   switch (a.status) {
+     case 'Awaiting Ack':
+       return (
+@@ -112,6 +119,40 @@ export function AssignmentActions({ a }) {
+   }
+ }
+ 
++// Riders only move their own job forward; recovery tools stay with the ops team.
++function RiderActions({ a, rider, act }) {
++  switch (a.status) {
++    case 'Awaiting Ack':
++      return (
++        <button className="btn btn-xs btn-success" disabled={rider.ghost} onClick={() => act((s, now) => acknowledge(s, now, a.id), { success: 'Job accepted', successMsg: `${a.qty} ${a.unit} — head to the pickup point` })}>
++          <CheckCheck size={13} /> Accept job
++        </button>
++      );
++    case 'Acknowledged':
++      return (
++        <button className="btn btn-xs btn-primary" onClick={() => act((s, now) => completePickup(s, now, a.id), { success: 'Pickup confirmed', successMsg: `${a.qty} ${a.unit} collected` })}>
++          <PackageCheck size={13} /> Confirm pickup
++        </button>
++      );
++    case 'Picked Up':
++      return (
++        <button className="btn btn-xs btn-primary" onClick={() => act((s, now) => startDelivery(s, now, a.id), { success: 'On the way' })}>
++          <Truck size={13} /> Start delivery
++        </button>
++      );
++    case 'In Transit':
++      return (
++        <button className="btn btn-xs btn-success" onClick={() => act((s, now) => completeDelivery(s, now, a.id), { success: 'Delivered', successMsg: `${a.qty} ${a.unit} rescued`, errorTitle: 'Delivery blocked' })}>
++          <Flag size={13} /> Confirm drop-off
++        </button>
++      );
++    case 'At Risk':
++      return <span className="cell-sub" style={{ color: 'var(--red)' }}>Hold cargo — ops team is finding a safe destination</span>;
++    default:
++      return null;
++  }
++}
++
+ export default function AssignmentTable({ assignments, now, emptyText = 'No active deliveries' }) {
+   const { state } = useApp();
+   if (!assignments.length) return <Empty>{emptyText}</Empty>;
+diff --git a/src/components/BatchDetails.jsx b/src/components/BatchDetails.jsx
+index a25e29b..0d0b3d0 100644
+--- a/src/components/BatchDetails.jsx
++++ b/src/components/BatchDetails.jsx
+@@ -1,5 +1,6 @@
+ import { Ban, Package, Pencil, Send } from 'lucide-react';
+ import { useApp, useAction } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import { describeRules } from '../services/compatibilityService.js';
+ import { batchBlockReason, getRider, getShelter, remainingMins } from '../services/dispatchEngine.js';
+ import { cancelBatch } from '../services/reservationService.js';
+@@ -9,8 +10,10 @@ import { Modal, QuantityBar, StatusBadge } from './ui.jsx';
+ export default function BatchDetails({ batchId, onClose, onEdit }) {
+   const { state, now, navigate, confirm } = useApp();
+   const act = useAction();
++  const { user, can } = useAuth();
+   const b = state.batches.find((x) => x.id === batchId);
+   if (!b) return null;
++  const canManage = user.role === 'admin' || (user.role === 'donor' && user.donorName === b.donor);
+   const block = batchBlockReason(b, now);
+   const rem = remainingMins(b, now);
+   const assignments = state.assignments.filter((a) => a.batchId === b.id);
+@@ -34,12 +37,14 @@ export default function BatchDetails({ batchId, onClose, onEdit }) {
+       onClose={onClose}
+       footer={
+         <>
+-          <button className="btn btn-danger" onClick={doCancel} disabled={b.cancelled}><Ban size={14} /> Cancel batch</button>
++          <button className="btn btn-danger" onClick={doCancel} disabled={b.cancelled || !canManage}><Ban size={14} /> Cancel batch</button>
+           <span className="spacer" />
+-          <button className="btn" onClick={() => { onClose(); onEdit?.(b); }} disabled={b.cancelled || !onEdit}><Pencil size={14} /> Edit</button>
+-          <button className="btn btn-primary" disabled={!!block} title={block ?? ''} onClick={() => { onClose(); navigate('dispatch', { batchId: b.id }); }}>
+-            <Send size={14} /> Plan dispatch
+-          </button>
++          <button className="btn" onClick={() => { onClose(); onEdit?.(b); }} disabled={b.cancelled || !onEdit || !canManage}><Pencil size={14} /> Edit</button>
++          {can('dispatch') && (
++            <button className="btn btn-primary" disabled={!!block} title={block ?? ''} onClick={() => { onClose(); navigate('dispatch', { batchId: b.id }); }}>
++              <Send size={14} /> Plan dispatch
++            </button>
++          )}
+         </>
+       }
+     >
+diff --git a/src/components/DonationForm.jsx b/src/components/DonationForm.jsx
+index c0dda14..a8d85bb 100644
+--- a/src/components/DonationForm.jsx
++++ b/src/components/DonationForm.jsx
+@@ -2,6 +2,7 @@ import { PackagePlus, Pencil } from 'lucide-react';
+ import { useState } from 'react';
+ import { CATEGORIES, DEFAULT_UNITS, DONORS, STORAGE_OPTIONS } from '../data/constants.js';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import { createBatch, updateBatch, validateBatchForm } from '../services/reservationService.js';
+ import { fromLocalInput, MINUTE, toLocalInput } from '../utils/timeUtils.js';
+ import { Modal } from './ui.jsx';
+@@ -44,7 +45,12 @@ function initialForm(batch, nextIdPreview) {
+ 
+ export default function DonationForm({ batch, onClose }) {
+   const { state, run, toast } = useApp();
+-  const [form, setForm] = useState(() => initialForm(batch, `B-${(state.counters.batch ?? 1000) + 1}`));
++  const { user } = useAuth();
++  const lockedDonor = user?.role === 'donor' ? user.donorName : null;
++  const [form, setForm] = useState(() => {
++    const f = initialForm(batch, `B-${(state.counters.batch ?? 1000) + 1}`);
++    return lockedDonor ? { ...f, donor: lockedDonor, pickupLocation: f.pickupLocation || lockedDonor } : f;
++  });
+   const [errors, setErrors] = useState([]);
+   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+ 
+@@ -106,7 +112,7 @@ export default function DonationForm({ batch, onClose }) {
+         </div>
+         <div className="field">
+           <label>Donor name</label>
+-          <input className="input" list="donor-list" value={form.donor} onChange={set('donor')} required />
++          <input className="input" list="donor-list" value={form.donor} onChange={set('donor')} readOnly={!!lockedDonor} required />
+           <datalist id="donor-list">{DONORS.map((d) => <option key={d} value={d} />)}</datalist>
+         </div>
+         <div className="field">
+diff --git a/src/components/Header.jsx b/src/components/Header.jsx
+index efe6ac9..42ed50e 100644
+--- a/src/components/Header.jsx
++++ b/src/components/Header.jsx
+@@ -1,6 +1,9 @@
+-import { Bell, CheckCircle2, Menu } from 'lucide-react';
++import { Bell, CheckCircle2, LogOut, Menu } from 'lucide-react';
+ import { useEffect, useMemo, useRef, useState } from 'react';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
++import { ROLES } from '../services/authService.js';
++import { addLog } from '../services/logService.js';
+ import { checkIntegrity } from '../services/reservationService.js';
+ import { remainingMins } from '../services/dispatchEngine.js';
+ import { timeAgo } from '../utils/timeUtils.js';
+@@ -20,8 +23,11 @@ export function useSystemStatus() {
+   }, [state, now]);
+ }
+ 
+-export default function Header({ onMenu }) {
+-  const { state, route, navigate, run } = useApp();
++export default function Header({ onMenu, pageId }) {
++  const { state, navigate, run, confirm } = useApp();
++  const { user, logout, can } = useAuth();
++  const [userOpen, setUserOpen] = useState(false);
++  const userRef = useRef(null);
+   const [clock, setClock] = useState(Date.now());
+   const [open, setOpen] = useState(false);
+   const ref = useRef(null);
+@@ -32,13 +38,24 @@ export default function Header({ onMenu }) {
+     return () => clearInterval(id);
+   }, []);
+   useEffect(() => {
+-    const onClick = (e) => ref.current && !ref.current.contains(e.target) && setOpen(false);
++    const onClick = (e) => {
++      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
++      if (userRef.current && !userRef.current.contains(e.target)) setUserOpen(false);
++    };
+     document.addEventListener('mousedown', onClick);
+     return () => document.removeEventListener('mousedown', onClick);
+   }, []);
+ 
+   const alerts = state.alerts.filter((a) => !a.resolved);
+-  const title = NAV.find((n) => n.id === route.page)?.label ?? '';
++  const title = NAV.find((n) => n.id === pageId)?.label ?? '';
++  const initials = user.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
++  const signOut = async () => {
++    setUserOpen(false);
++    const ok = await confirm({ title: 'Sign out?', message: 'You will return to the sign-in page. Operations data stays saved.', confirmLabel: 'Sign out' });
++    if (!ok) return;
++    run((s, t) => addLog(s, t, { type: 'User signed out', description: `${user.name} (${ROLES[user.role].label}) signed out`, status: 'info' }));
++    logout();
++  };
+   const d = new Date(clock);
+ 
+   return (
+@@ -81,10 +98,12 @@ export default function Header({ onMenu }) {
+                       <div className="strong" style={{ fontSize: 13 }}>{a.title}</div>
+                       <div className="cell-sub">{a.message}</div>
+                       <div className="row" style={{ marginTop: 8 }}>
+-                        <button className="btn btn-xs" onClick={() => { navigate('dispatch', { batchId: a.batchId }); setOpen(false); }}>
+-                          Open in Dispatch
+-                        </button>
+-                        {a.kind !== 'at-risk' && (
++                        {can('dispatch') && (
++                          <button className="btn btn-xs" onClick={() => { navigate('dispatch', { batchId: a.batchId }); setOpen(false); }}>
++                            Open in Dispatch
++                          </button>
++                        )}
++                        {a.kind !== 'at-risk' && can('dispatch') && (
+                           <button
+                             className="btn btn-xs btn-ghost"
+                             onClick={() => run((s, t) => {
+@@ -104,12 +123,22 @@ export default function Header({ onMenu }) {
+             </div>
+           )}
+         </div>
+-        <div className="admin">
+-          <div className="avatar">OA</div>
+-          <div className="admin-name" style={{ lineHeight: 1.25 }}>
+-            <div className="strong" style={{ fontSize: 13 }}>Ops Admin</div>
+-            <div className="subtle" style={{ fontSize: 11.5 }}>Control room</div>
+-          </div>
++        <div style={{ position: 'relative' }} ref={userRef}>
++          <button className="admin-btn" onClick={() => setUserOpen((o) => !o)} aria-label="Account menu">
++            <div className="avatar">{initials}</div>
++            <div className="admin-name" style={{ lineHeight: 1.25 }}>
++              <div className="strong" style={{ fontSize: 13 }}>{user.name}</div>
++              <div className="subtle" style={{ fontSize: 11.5 }}>{ROLES[user.role].label}</div>
++            </div>
++          </button>
++          {userOpen && (
++            <div className="user-menu">
++              <div className="strong">{user.name}</div>
++              <div className="cell-sub" style={{ wordBreak: 'break-all' }}>{user.email}</div>
++              <div style={{ margin: '8px 0 12px' }}><span className="badge b-navy">{ROLES[user.role].label}</span></div>
++              <button className="btn btn-sm" style={{ width: '100%' }} onClick={signOut}><LogOut size={14} /> Sign out</button>
++            </div>
++          )}
+         </div>
+       </div>
+     </header>
+diff --git a/src/components/RiderCard.jsx b/src/components/RiderCard.jsx
+index 5796c8c..8c7a1cc 100644
+--- a/src/components/RiderCard.jsx
++++ b/src/components/RiderCard.jsx
+@@ -1,5 +1,6 @@
+ import { Bike, Clock, Gauge, Moon, Power, UserCheck, Ghost } from 'lucide-react';
+ import { useApp, useAction } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import { getShelter } from '../services/dispatchEngine.js';
+ import { setRiderAvailability, toggleGhost } from '../services/reservationService.js';
+ import { Progress, StatusBadge } from './ui.jsx';
+@@ -7,6 +8,9 @@ import { Progress, StatusBadge } from './ui.jsx';
+ export default function RiderCard({ rider }) {
+   const { state, confirm } = useApp();
+   const act = useAction();
++  const { user } = useAuth();
++  const isAdmin = user?.role === 'admin';
++  const isSelf = user?.role === 'rider' && user.riderId === rider.id;
+   const a = rider.currentAssignment ? state.assignments.find((x) => x.id === rider.currentAssignment) : null;
+   const shelter = a ? getShelter(state, a.shelterId) : null;
+   const relColor = rider.reliability >= 85 ? 'var(--green)' : rider.reliability >= 65 ? 'var(--orange)' : 'var(--red)';
+@@ -56,19 +60,20 @@ export default function RiderCard({ rider }) {
+       )}
+ 
+       <div className="entity-actions">
+-        {rider.status === 'Unresponsive' && (
++        {rider.status === 'Unresponsive' && isAdmin && (
+           <button className="btn btn-sm btn-success" onClick={reinstate}><UserCheck size={14} /> Reinstate</button>
+         )}
+-        {rider.status === 'Off Duty' && (
++        {rider.status === 'Off Duty' && (isAdmin || isSelf) && (
+           <button className="btn btn-sm" onClick={() => act((s, now) => setRiderAvailability(s, now, rider.id, 'Available'), { success: 'Rider on duty', successMsg: rider.name })}>
+             <Power size={14} /> Set available
+           </button>
+         )}
+-        {rider.status === 'Available' && (
++        {rider.status === 'Available' && (isAdmin || isSelf) && (
+           <button className="btn btn-sm" onClick={() => act((s, now) => setRiderAvailability(s, now, rider.id, 'Off Duty'), { success: 'Rider off duty', successMsg: rider.name })}>
+             <Moon size={14} /> Set off duty
+           </button>
+         )}
++        {isAdmin && (
+         <button
+           className={`btn btn-sm ${rider.ghost ? 'btn-warning' : 'btn-ghost'}`}
+           onClick={() => act((s, now) => toggleGhost(s, now, rider.id), { success: 'Simulation updated', successMsg: (r) => `${rider.name} will ${r.ghost ? 'ignore' : 'answer'} new reservations` })}
+@@ -76,6 +81,8 @@ export default function RiderCard({ rider }) {
+         >
+           <Ghost size={14} /> {rider.ghost ? 'Unresponsive (sim) ✓' : 'Simulate unresponsive'}
+         </button>
++        )}
++        {isSelf && rider.status === 'Unresponsive' && <span className="cell-sub" style={{ color: 'var(--red)' }}>You missed a job. Ask the ops team to reinstate you.</span>}
+       </div>
+     </div>
+   );
+diff --git a/src/components/ShelterCard.jsx b/src/components/ShelterCard.jsx
+index c5e6fe1..1d8abd6 100644
+--- a/src/components/ShelterCard.jsx
++++ b/src/components/ShelterCard.jsx
+@@ -2,6 +2,7 @@ import { Building2, Clock, DoorClosed, DoorOpen, MapPin, PencilLine, ZapOff } fr
+ import { useState } from 'react';
+ import { CATEGORIES, RESOURCES } from '../data/constants.js';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import { shelterInbound } from '../services/dispatchEngine.js';
+ import { updateShelter } from '../services/reservationService.js';
+ import { Modal, Progress, StatusBadge } from './ui.jsx';
+@@ -99,6 +100,8 @@ export default function ShelterCard({ shelter }) {
+   const { state, confirm } = useApp();
+   const update = useShelterUpdate();
+   const [editing, setEditing] = useState(false);
++  const { user } = useAuth();
++  const canEdit = user?.role === 'admin' || (user?.role === 'shelter' && user.shelterId === shelter.id);
+   const label = `Shelter ${shelter.code}`;
+ 
+   const toggleStatus = async () => {
+@@ -167,7 +170,8 @@ export default function ShelterCard({ shelter }) {
+         ))}
+       </div>
+ 
+-      <div className="entity-actions">
++      {!canEdit && <div className="cell-sub">Only this shelter's coordinator or the ops team can update it.</div>}
++      {canEdit && <div className="entity-actions">
+         <button className="btn btn-sm" onClick={() => setEditing(true)}><PencilLine size={14} /> Update demand</button>
+         {'Cooked meals' in shelter.demand && shelter.demand['Cooked meals'] > 0 && shelter.status === 'Open' && (
+           <button className="btn btn-sm btn-warning" onClick={zeroMeals}><ZapOff size={14} /> Meals demand → 0</button>
+@@ -175,7 +179,7 @@ export default function ShelterCard({ shelter }) {
+         <button className={`btn btn-sm ${shelter.status === 'Open' ? 'btn-danger' : 'btn-success'}`} onClick={toggleStatus}>
+           {shelter.status === 'Open' ? <><DoorClosed size={14} /> Close</> : <><DoorOpen size={14} /> Reopen</>}
+         </button>
+-      </div>
++      </div>}
+       {editing && <ShelterEditor shelter={shelter} onClose={() => setEditing(false)} />}
+     </div>
+   );
+diff --git a/src/components/Sidebar.jsx b/src/components/Sidebar.jsx
+index bcc6022..774cb33 100644
+--- a/src/components/Sidebar.jsx
++++ b/src/components/Sidebar.jsx
+@@ -1,8 +1,11 @@
+-import { Activity, Bike, Building2, FlaskConical, LayoutDashboard, Package, Route, ShieldCheck } from 'lucide-react';
++import { Activity, Bike, Building2, FlaskConical, LayoutDashboard, Package, Route, ShieldCheck, Truck } from 'lucide-react';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
++import { ROLES } from '../services/authService.js';
+ 
+ export const NAV = [
+   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
++  { id: 'mydeliveries', label: 'My Deliveries', icon: Truck },
+   { id: 'donations', label: 'Donations', icon: Package },
+   { id: 'riders', label: 'Riders', icon: Bike },
+   { id: 'shelters', label: 'Shelters', icon: Building2 },
+@@ -13,10 +16,12 @@ export const NAV = [
+ 
+ export default function Sidebar({ open, onNavigate }) {
+   const { route, navigate, state } = useApp();
++  const { user, can } = useAuth();
+   const openAlerts = state.alerts.filter((a) => !a.resolved).length;
+   const awaiting = state.assignments.filter((a) => a.status === 'Awaiting Ack' || a.status === 'At Risk').length;
+ 
+-  const counts = { dispatch: awaiting + openAlerts };
++  const mine = state.assignments.filter((a) => a.riderId === user?.riderId && ['Awaiting Ack', 'At Risk'].includes(a.status)).length;
++  const counts = { dispatch: awaiting + openAlerts, mydeliveries: mine };
+   return (
+     <aside className={`sidebar ${open ? 'open' : ''}`}>
+       <div className="logo">
+@@ -29,7 +34,7 @@ export default function Sidebar({ open, onNavigate }) {
+         </div>
+       </div>
+       <nav className="nav">
+-        {NAV.map(({ id, label, icon: Icon }) => (
++        {NAV.filter((n) => can(n.id)).map(({ id, label, icon: Icon }) => (
+           <button
+             key={id}
+             className={`nav-item ${route.page === id ? 'active' : ''}`}
+@@ -45,7 +50,8 @@ export default function Sidebar({ open, onNavigate }) {
+         ))}
+       </nav>
+       <div className="sidebar-foot">
+-        Prototype · data stored in this browser
++        Signed in as {ROLES[user.role].label}
++        <div>Prototype · data stored in this browser</div>
+       </div>
+     </aside>
+   );
+diff --git a/src/context/AuthContext.jsx b/src/context/AuthContext.jsx
+new file mode 100644
+index 0000000..3a3f40f
+--- /dev/null
++++ b/src/context/AuthContext.jsx
+@@ -0,0 +1,26 @@
++import { createContext, useCallback, useContext, useState } from 'react';
++import { canAccess, loadSession, saveSession } from '../services/authService.js';
++
++const AuthContext = createContext(null);
++
++export function AuthProvider({ children }) {
++  const [user, setUser] = useState(() => loadSession());
++
++  const signIn = useCallback((u) => {
++    saveSession(u);
++    setUser(u);
++  }, []);
++
++  const logout = useCallback(() => {
++    saveSession(null);
++    setUser(null);
++  }, []);
++
++  const can = useCallback((page) => canAccess(user, page), [user]);
++
++  return <AuthContext.Provider value={{ user, signIn, logout, can }}>{children}</AuthContext.Provider>;
++}
++
++export function useAuth() {
++  return useContext(AuthContext);
++}
+diff --git a/src/index.css b/src/index.css
+index 76a41b7..74cee34 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -369,3 +369,57 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+   .kv dd { margin-bottom: 8px; }
+   .score-row { grid-template-columns: 110px 1fr 40px; }
+ }
++
++/* ---------------- Login ---------------- */
++.login { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); min-height: 100vh; }
++.login-brand {
++  background: var(--brand); color: #dbe4f0; padding: 40px 48px; display: flex; flex-direction: column; gap: 32px;
++}
++.login-pitch h1 { font-size: 30px; line-height: 1.2; color: white; letter-spacing: -0.02em; max-width: 460px; text-wrap: balance; }
++.login-pitch p { margin-top: 12px; max-width: 470px; color: #b8c6da; font-size: 14.5px; }
++.login-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 470px; }
++.login-stats > div { background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 12px 14px; }
++.login-stats b { display: block; font-size: 24px; color: white; }
++.login-stats span { font-size: 12.5px; color: #9fb0c8; }
++.login-roles { list-style: none; padding: 0; margin: auto 0 0; display: flex; flex-direction: column; gap: 9px; font-size: 13px; color: #b8c6da; }
++.login-roles li { display: flex; gap: 9px; align-items: flex-start; }
++.login-roles li svg { color: #4ade80; flex-shrink: 0; margin-top: 2px; }
++.login-roles b { color: white; font-weight: 600; }
++.login-panel { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 24px; }
++.login-card { width: 100%; max-width: 480px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); padding: 28px; }
++.login-card h2 { font-size: 21px; letter-spacing: -0.01em; }
++.login-divider { display: flex; align-items: center; gap: 10px; margin: 22px 0 12px; color: var(--subtle); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
++.login-divider::before, .login-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
++.demo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
++.demo-btn {
++  display: flex; gap: 10px; align-items: center; text-align: left; padding: 10px; border-radius: 10px;
++  border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; min-width: 0;
++}
++.demo-btn:hover { border-color: var(--brand); background: var(--brand-soft); }
++.demo-btn:focus-visible, .role-option:focus-within { outline: 2px solid var(--brand); outline-offset: 2px; }
++.demo-icon { width: 32px; height: 32px; border-radius: 8px; background: var(--brand-soft); color: var(--brand); display: grid; place-items: center; flex-shrink: 0; }
++.demo-role { display: block; font-weight: 600; font-size: 13px; }
++.demo-cred { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.role-pick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
++.role-option {
++  display: flex; flex-direction: column; gap: 4px; padding: 11px; border: 1px solid var(--border); border-radius: 10px;
++  cursor: pointer; color: var(--muted); background: var(--surface);
++}
++.role-option input { position: absolute; opacity: 0; pointer-events: none; }
++.role-option.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
++.role-option.active .strong { color: var(--brand); }
++.user-menu { position: absolute; right: 0; top: 46px; width: 240px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); z-index: 50; padding: 12px; }
++.admin-btn { display: flex; align-items: center; gap: 9px; background: none; border: 0; cursor: pointer; padding: 3px; border-radius: 10px; text-align: left; }
++.admin-btn:hover { background: var(--surface-2); }
++
++@media (max-width: 900px) {
++  .login { grid-template-columns: minmax(0, 1fr); }
++  .login-brand { padding: 28px 20px; gap: 20px; }
++  .login-pitch h1 { font-size: 23px; }
++  .login-roles { display: none; }
++  .login-panel { padding: 24px 16px 40px; justify-content: flex-start; }
++}
++@media (max-width: 520px) {
++  .demo-grid, .role-pick { grid-template-columns: minmax(0, 1fr); }
++  .login-card { padding: 20px; }
++}
+diff --git a/src/pages/Dashboard.jsx b/src/pages/Dashboard.jsx
+index 6fc6868..a8b637c 100644
+--- a/src/pages/Dashboard.jsx
++++ b/src/pages/Dashboard.jsx
+@@ -1,6 +1,8 @@
+ import { AlertTriangle, ArrowRight, Bike, Boxes, CheckCircle2, Clock4, PackagePlus, Siren, Truck, Utensils } from 'lucide-react';
+ import { useMemo, useState } from 'react';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
++import { ROLES } from '../services/authService.js';
+ import StatCard from '../components/StatCard.jsx';
+ import AssignmentTable from '../components/AssignmentTable.jsx';
+ import DonationTable from '../components/DonationTable.jsx';
+@@ -29,6 +31,7 @@ export function useKpis() {
+ 
+ export default function Dashboard() {
+   const { state, now, navigate, run, toast } = useApp();
++  const { user, can } = useAuth();
+   const k = useKpis();
+   const [showForm, setShowForm] = useState(false);
+   const [viewId, setViewId] = useState(null);
+@@ -50,13 +53,15 @@ export default function Dashboard() {
+     <div className="page">
+       <div className="page-head">
+         <div>
+-          <h1>Operations overview</h1>
+-          <p>Live view of perishable donations, riders and shelters. Every assignment is checked for expiry, capacity, demand and compatibility.</p>
++          <h1>{user.role === 'admin' ? 'Operations overview' : `Welcome, ${user.name.split(' ')[0]}`}</h1>
++          <p>{user.role === 'admin' ? 'Live view of perishable donations, riders and shelters. Every assignment is checked for expiry, capacity, demand and compatibility.' : `You're signed in as ${ROLES[user.role].label.toLowerCase()}. This is the live city-wide picture; your own tools are in the menu.`}</p>
+         </div>
+         <div className="page-actions">
+-          <button className="btn btn-warning" onClick={emergency}><Siren size={15} /> Simulate emergency</button>
+-          <button className="btn" onClick={() => setShowForm(true)}><PackagePlus size={15} /> New donation</button>
+-          <button className="btn btn-primary" onClick={() => navigate('dispatch')}>Dispatch Center <ArrowRight size={15} /></button>
++          {can('simulator') && <button className="btn btn-warning" onClick={emergency}><Siren size={15} /> Simulate emergency</button>}
++          {can('donations') && <button className="btn" onClick={() => setShowForm(true)}><PackagePlus size={15} /> New donation</button>}
++          {can('dispatch') && <button className="btn btn-primary" onClick={() => navigate('dispatch')}>Dispatch Center <ArrowRight size={15} /></button>}
++          {can('mydeliveries') && <button className="btn btn-primary" onClick={() => navigate('mydeliveries')}>My deliveries <ArrowRight size={15} /></button>}
++          {user.role === 'shelter' && <button className="btn btn-primary" onClick={() => navigate('shelters')}>My shelter <ArrowRight size={15} /></button>}
+         </div>
+       </div>
+ 
+@@ -76,7 +81,7 @@ export default function Dashboard() {
+               <Truck size={16} color="var(--brand)" />
+               <h3>Live dispatch overview</h3>
+               <span className="sub">{active.length} active</span>
+-              <div className="right"><button className="btn btn-sm" onClick={() => navigate('dispatch')}>Manage</button></div>
++              {can('dispatch') && <div className="right"><button className="btn btn-sm" onClick={() => navigate('dispatch')}>Manage</button></div>}
+             </div>
+             <AssignmentTable assignments={active} now={now} emptyText="No deliveries in progress. Open the Dispatch Center to assign riders." />
+           </div>
+@@ -86,9 +91,9 @@ export default function Dashboard() {
+               <Boxes size={16} color="var(--brand)" />
+               <h3>Donation batches</h3>
+               <span className="sub">sorted by expiry</span>
+-              <div className="right"><button className="btn btn-sm" onClick={() => navigate('donations')}>View all</button></div>
++              {can('donations') && <div className="right"><button className="btn btn-sm" onClick={() => navigate('donations')}>View all</button></div>}
+             </div>
+-            <DonationTable batches={batches} now={now} compact onView={(b) => setViewId(b.id)} onDispatch={(b) => navigate('dispatch', { batchId: b.id })} />
++            <DonationTable batches={batches} now={now} compact onView={(b) => setViewId(b.id)} onDispatch={can('dispatch') ? (b) => navigate('dispatch', { batchId: b.id }) : undefined} />
+           </div>
+         </div>
+ 
+@@ -105,7 +110,7 @@ export default function Dashboard() {
+             <div className="card-head">
+               <Bike size={16} color="var(--brand)" />
+               <h3>Rider availability</h3>
+-              <div className="right"><button className="btn btn-sm" onClick={() => navigate('riders')}>Riders</button></div>
++              {can('riders') && <div className="right"><button className="btn btn-sm" onClick={() => navigate('riders')}>Riders</button></div>}
+             </div>
+             <div className="card-body" style={{ paddingTop: 10, paddingBottom: 10 }}>
+               {state.riders.map((r) => (
+@@ -123,7 +128,7 @@ export default function Dashboard() {
+             <div className="card-head">
+               <Utensils size={16} color="var(--brand)" />
+               <h3>Shelter demand</h3>
+-              <div className="right"><button className="btn btn-sm" onClick={() => navigate('shelters')}>Shelters</button></div>
++              {can('shelters') && <div className="right"><button className="btn btn-sm" onClick={() => navigate('shelters')}>Shelters</button></div>}
+             </div>
+             <div className="card-body">
+               {state.shelters.map((sh) => {
+@@ -148,7 +153,7 @@ export default function Dashboard() {
+             <div className="card-head">
+               <CheckCircle2 size={16} color="var(--brand)" />
+               <h3>Recent operational events</h3>
+-              <div className="right"><button className="btn btn-sm" onClick={() => navigate('logs')}>All logs</button></div>
++              {can('logs') && <div className="right"><button className="btn btn-sm" onClick={() => navigate('logs')}>All logs</button></div>}
+             </div>
+             <ActivityFeed logs={state.logs.slice(0, 7)} />
+           </div>
+diff --git a/src/pages/Donations.jsx b/src/pages/Donations.jsx
+index d210ab1..bbc93f8 100644
+--- a/src/pages/Donations.jsx
++++ b/src/pages/Donations.jsx
+@@ -1,6 +1,7 @@
+ import { PackagePlus, Search } from 'lucide-react';
+ import { useState } from 'react';
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import DonationTable from '../components/DonationTable.jsx';
+ import DonationForm from '../components/DonationForm.jsx';
+ import BatchDetails from '../components/BatchDetails.jsx';
+@@ -11,6 +12,9 @@ const STATUSES = ['Available', 'Reserved', 'Assigned', 'In Transit', 'Delivered'
+ 
+ export default function Donations() {
+   const { state, now, navigate } = useApp();
++  const { user, can } = useAuth();
++  const isDonor = user.role === 'donor';
++  const visible = isDonor ? state.batches.filter((b) => b.donor === user.donorName) : state.batches;
+   const [q, setQ] = useState('');
+   const [status, setStatus] = useState('');
+   const [category, setCategory] = useState('');
+@@ -19,19 +23,19 @@ export default function Donations() {
+   const [viewId, setViewId] = useState(null);
+ 
+   const term = q.trim().toLowerCase();
+-  const rows = state.batches.filter(
++  const rows = visible.filter(
+     (b) =>
+       (!status || b.status === status) &&
+       (!category || b.category === category) &&
+       (!term || `${b.id} ${b.donor} ${b.description} ${b.pickupLocation}`.toLowerCase().includes(term)),
+   );
+-  const counts = STATUSES.map((s) => [s, state.batches.filter((b) => b.status === s).length]);
++  const counts = STATUSES.map((s) => [s, visible.filter((b) => b.status === s).length]);
+ 
+   return (
+     <div className="page">
+       <div className="page-head">
+         <div>
+-          <h1>Donations</h1>
++          <h1>{isDonor ? `${user.donorName} donations` : 'Donations'}</h1>
+           <p>Every donation batch with live quantity tracking: available, reserved, collected, delivered and spoiled units always add up to the original quantity.</p>
+         </div>
+         <div className="page-actions">
+@@ -61,12 +65,12 @@ export default function Donations() {
+             <option value="">All statuses</option>
+             {STATUSES.map((s) => <option key={s}>{s}</option>)}
+           </select>
+-          <span className="subtle" style={{ marginLeft: 'auto', fontSize: 12.5 }}>{rows.length} of {state.batches.length} batches</span>
++          <span className="subtle" style={{ marginLeft: 'auto', fontSize: 12.5 }}>{rows.length} of {visible.length} batches</span>
+         </div>
+         {rows.length ? (
+-          <DonationTable batches={rows} now={now} onView={(b) => setViewId(b.id)} onEdit={(b) => setEditBatch(b)} onDispatch={(b) => navigate('dispatch', { batchId: b.id })} />
++          <DonationTable batches={rows} now={now} onView={(b) => setViewId(b.id)} onEdit={(b) => setEditBatch(b)} onDispatch={can('dispatch') ? (b) => navigate('dispatch', { batchId: b.id }) : undefined} />
+         ) : (
+-          <Empty>No batches match these filters</Empty>
++          <Empty>{isDonor && !visible.length ? 'You have not listed any donations yet. Click "New donation" to add your first batch.' : 'No batches match these filters'}</Empty>
+         )}
+       </div>
+ 
+diff --git a/src/pages/Login.jsx b/src/pages/Login.jsx
+new file mode 100644
+index 0000000..55a13cf
+--- /dev/null
++++ b/src/pages/Login.jsx
+@@ -0,0 +1,253 @@
++import { Bike, Building2, Eye, EyeOff, HandHeart, LogIn, ShieldCheck, UserPlus, Wrench } from 'lucide-react';
++import { useState } from 'react';
++import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
++import { DONORS } from '../data/constants.js';
++import { addLog } from '../services/logService.js';
++import { addRider } from '../services/reservationService.js';
++import { createAccount, DEMO_ACCOUNTS, login, ROLES, validateSignup } from '../services/authService.js';
++
++const ROLE_ICONS = { admin: Wrench, donor: HandHeart, rider: Bike, shelter: Building2 };
++
++function PasswordInput({ id, value, onChange, autoComplete }) {
++  const [show, setShow] = useState(false);
++  return (
++    <div style={{ position: 'relative' }}>
++      <input id={id} className="input" type={show ? 'text' : 'password'} value={value} onChange={onChange} autoComplete={autoComplete} style={{ paddingRight: 40 }} />
++      <button type="button" className="btn btn-ghost btn-xs" onClick={() => setShow((s) => !s)} aria-label={show ? 'Hide password' : 'Show password'} style={{ position: 'absolute', right: 5, top: 6 }}>
++        {show ? <EyeOff size={15} /> : <Eye size={15} />}
++      </button>
++    </div>
++  );
++}
++
++function SignInForm({ onDone }) {
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [error, setError] = useState('');
++
++  const submit = (e) => {
++    e.preventDefault();
++    const res = login(email, password);
++    if (!res.ok) return setError(res.reason);
++    onDone(res.user);
++  };
++
++  const quick = (acc) => {
++    const res = login(acc.email, acc.password);
++    if (res.ok) onDone(res.user);
++  };
++
++  return (
++    <>
++      <form onSubmit={submit} className="stack" style={{ gap: 14 }}>
++        {error && <div className="form-errors" style={{ margin: 0 }}>{error}</div>}
++        <div className="field">
++          <label htmlFor="login-email">Email</label>
++          <input id="login-email" className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" placeholder="you@example.org" autoFocus />
++        </div>
++        <div className="field">
++          <label htmlFor="login-password">Password</label>
++          <PasswordInput id="login-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
++        </div>
++        <button className="btn btn-primary" style={{ height: 42 }} type="submit"><LogIn size={16} /> Sign in</button>
++      </form>
++
++      <div className="login-divider"><span>Demo accounts for judges</span></div>
++      <div className="demo-grid">
++        {DEMO_ACCOUNTS.map((acc) => {
++          const Icon = ROLE_ICONS[acc.role];
++          return (
++            <button key={acc.id} type="button" className="demo-btn" onClick={() => quick(acc)}>
++              <span className="demo-icon"><Icon size={16} /></span>
++              <span style={{ minWidth: 0 }}>
++                <span className="demo-role">{ROLES[acc.role].label}</span>
++                <span className="demo-cred mono">{acc.email}</span>
++                <span className="demo-cred mono">password: {acc.password}</span>
++              </span>
++            </button>
++          );
++        })}
++      </div>
++    </>
++  );
++}
++
++function SignUpForm({ onDone }) {
++  const { state, run } = useApp();
++  const [form, setForm] = useState({
++    role: 'donor', name: '', email: '', password: '', confirm: '',
++    donorName: '', shelterId: '', vehicle: 'Scooter', capacity: '30', travelMins: '10',
++  });
++  const [errors, setErrors] = useState([]);
++  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
++
++  const submit = (e) => {
++    e.preventDefault();
++    const errs = validateSignup(form);
++    if (errs.length) return setErrors(errs);
++    const extra = {};
++    if (form.role === 'donor') extra.donorName = form.donorName.trim();
++    if (form.role === 'shelter') extra.shelterId = form.shelterId;
++    if (form.role === 'rider') {
++      const riderId = `R-${Date.now().toString(36).toUpperCase().slice(-5)}`;
++      const profile = { id: riderId, name: form.name, vehicle: form.vehicle, capacity: form.capacity, travelMins: form.travelMins, reliability: 85 };
++      const res = run((s, now) => addRider(s, now, profile));
++      if (!res.ok) return setErrors([res.reason]);
++      extra.riderId = riderId;
++      extra.riderProfile = profile;
++    }
++    onDone(createAccount(form, extra), true);
++  };
++
++  return (
++    <form onSubmit={submit} className="stack" style={{ gap: 14 }}>
++      {errors.length > 0 && (
++        <div className="form-errors" style={{ margin: 0 }}>
++          <ul style={{ margin: 0 }}>{errors.map((x) => <li key={x}>{x}</li>)}</ul>
++        </div>
++      )}
++      <div className="field">
++        <label>I am joining as</label>
++        <div className="role-pick">
++          {['donor', 'rider', 'shelter'].map((r) => {
++            const Icon = ROLE_ICONS[r];
++            return (
++              <label key={r} className={`role-option ${form.role === r ? 'active' : ''}`}>
++                <input type="radio" name="role" value={r} checked={form.role === r} onChange={set('role')} />
++                <Icon size={17} />
++                <span className="strong" style={{ fontSize: 13 }}>{ROLES[r].label}</span>
++                <span className="cell-sub">{ROLES[r].description}</span>
++              </label>
++            );
++          })}
++        </div>
++      </div>
++      <div className="form-grid">
++        <div className="field">
++          <label htmlFor="su-name">Full name</label>
++          <input id="su-name" className="input" value={form.name} onChange={set('name')} autoComplete="name" />
++        </div>
++        <div className="field">
++          <label htmlFor="su-email">Email</label>
++          <input id="su-email" className="input" type="email" value={form.email} onChange={set('email')} autoComplete="email" />
++        </div>
++        <div className="field">
++          <label htmlFor="su-pass">Password</label>
++          <PasswordInput id="su-pass" value={form.password} onChange={set('password')} autoComplete="new-password" />
++          <span className="hint">At least 6 characters</span>
++        </div>
++        <div className="field">
++          <label htmlFor="su-confirm">Confirm password</label>
++          <PasswordInput id="su-confirm" value={form.confirm} onChange={set('confirm')} autoComplete="new-password" />
++        </div>
++
++        {form.role === 'donor' && (
++          <div className="field full">
++            <label htmlFor="su-org">Organisation</label>
++            <input id="su-org" className="input" list="su-donors" value={form.donorName} onChange={set('donorName')} placeholder="e.g. GreenLeaf Restaurant" />
++            <datalist id="su-donors">{DONORS.map((d) => <option key={d} value={d} />)}</datalist>
++            <span className="hint">You'll see the donations listed under this name</span>
++          </div>
++        )}
++        {form.role === 'shelter' && (
++          <div className="field full">
++            <label htmlFor="su-shelter">Shelter you coordinate</label>
++            <select id="su-shelter" className="select" value={form.shelterId} onChange={set('shelterId')}>
++              <option value="">Choose a shelter…</option>
++              {state.shelters.map((s) => <option key={s.id} value={s.id}>Shelter {s.code} · {s.name}</option>)}
++            </select>
++          </div>
++        )}
++        {form.role === 'rider' && (
++          <>
++            <div className="field">
++              <label htmlFor="su-vehicle">Vehicle</label>
++              <select id="su-vehicle" className="select" value={form.vehicle} onChange={set('vehicle')}>
++                {['Bicycle + trailer', 'Scooter', 'Motorbike', 'Auto-rickshaw', 'Cargo van'].map((v) => <option key={v}>{v}</option>)}
++              </select>
++            </div>
++            <div className="field">
++              <label htmlFor="su-cap">Carrying capacity (units)</label>
++              <input id="su-cap" className="input" type="number" min="1" value={form.capacity} onChange={set('capacity')} />
++            </div>
++          </>
++        )}
++      </div>
++      <button className="btn btn-primary" style={{ height: 42 }} type="submit"><UserPlus size={16} /> Create account</button>
++      <p className="cell-sub" style={{ textAlign: 'center' }}>Operations admin accounts are issued by the RescueFlow team.</p>
++    </form>
++  );
++}
++
++export default function Login() {
++  const { state, run, toast, navigate } = useApp();
++  const { signIn } = useAuth();
++  const [mode, setMode] = useState('signin');
++
++  const meals = state.batches.filter((b) => !b.cancelled && b.expiresAt > Date.now()).reduce((n, b) => n + b.qty.available, 0);
++  const riders = state.riders.filter((r) => !['Off Duty', 'Unresponsive'].includes(r.status)).length;
++  const shelters = state.shelters.filter((s) => s.status === 'Open').length;
++  const rescued = state.batches.reduce((n, b) => n + b.qty.delivered, 0);
++
++  const done = (user, isNew = false) => {
++    run((s, now) => addLog(s, now, {
++      type: isNew ? 'Account created' : 'User signed in',
++      description: `${user.name} (${ROLES[user.role].label}) ${isNew ? 'joined RescueFlow' : 'signed in'}`,
++      riderId: user.riderId ?? null,
++      status: 'info',
++    }));
++    signIn(user);
++    navigate('overview');
++    toast('success', isNew ? 'Welcome to RescueFlow' : `Welcome back, ${user.name.split(' ')[0]}`, `Signed in as ${ROLES[user.role].label}`);
++  };
++
++  return (
++    <div className="login">
++      <section className="login-brand">
++        <div className="logo" style={{ padding: 0 }}>
++          <div className="logo-mark"><ShieldCheck size={19} strokeWidth={2.4} /></div>
++          <div>
++            <div className="logo-text" style={{ color: 'white' }}>RescueFlow</div>
++            <div className="logo-sub" style={{ color: '#9fb0c8' }}>Perishable aid coordination</div>
++          </div>
++        </div>
++        <div className="login-pitch">
++          <h1>Get surplus food to people before it spoils.</h1>
++          <p>Donors, volunteer riders and shelters work from one live board. Every delivery is checked against shelf-life, rider capacity, shelter demand and what the shelter can actually use.</p>
++        </div>
++        <div className="login-stats">
++          <div><b className="mono">{meals}</b><span>units ready to move</span></div>
++          <div><b className="mono">{riders}</b><span>riders on duty</span></div>
++          <div><b className="mono">{shelters}</b><span>shelters open</span></div>
++          <div><b className="mono">{rescued}</b><span>units delivered</span></div>
++        </div>
++        <ul className="login-roles">
++          {Object.entries(ROLES).map(([key, r]) => {
++            const Icon = ROLE_ICONS[key];
++            return (
++              <li key={key}><Icon size={15} /><span><b>{r.label}</b> · {r.description}</span></li>
++            );
++          })}
++        </ul>
++      </section>
++
++      <section className="login-panel">
++        <div className="login-card">
++          <h2>{mode === 'signin' ? 'Sign in' : 'Create your account'}</h2>
++          <p className="muted" style={{ marginTop: 4, marginBottom: 18 }}>
++            {mode === 'signin' ? 'Everyone signs in. What you see depends on your role.' : 'Join as a donor, volunteer rider or shelter coordinator.'}
++          </p>
++          <div className="tabs" style={{ width: '100%', marginBottom: 18 }}>
++            <button type="button" className={`tab ${mode === 'signin' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setMode('signin')}>Sign in</button>
++            <button type="button" className={`tab ${mode === 'signup' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setMode('signup')}>Create account</button>
++          </div>
++          {mode === 'signin' ? <SignInForm onDone={done} /> : <SignUpForm onDone={done} />}
++        </div>
++        <p className="subtle" style={{ fontSize: 12, textAlign: 'center', marginTop: 16, maxWidth: 440 }}>
++          Prototype sign-in: accounts are saved in this browser only, and passwords are stored as hashes.
++        </p>
++      </section>
++    </div>
++  );
++}
+diff --git a/src/pages/MyDeliveries.jsx b/src/pages/MyDeliveries.jsx
+new file mode 100644
+index 0000000..af46c14
+--- /dev/null
++++ b/src/pages/MyDeliveries.jsx
+@@ -0,0 +1,77 @@
++import { Bike, UserPlus } from 'lucide-react';
++import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
++import AssignmentTable from '../components/AssignmentTable.jsx';
++import RiderCard from '../components/RiderCard.jsx';
++import { Empty, StatusBadge } from '../components/ui.jsx';
++import { ACTIVE_STATUSES, shelterLabel } from '../services/dispatchEngine.js';
++import { addRider } from '../services/reservationService.js';
++
++export default function MyDeliveries() {
++  const { state, now, run, toast } = useApp();
++  const { user } = useAuth();
++  const rider = state.riders.find((r) => r.id === user.riderId);
++
++  if (!rider) {
++    const recreate = () => {
++      const res = run((s, t) => addRider(s, t, { ...(user.riderProfile ?? { name: user.name, capacity: 30, travelMins: 10 }), id: user.riderId, name: user.name }));
++      if (res.ok) toast('success', 'Rider profile restored', 'You can receive deliveries again');
++      else toast('error', 'Could not restore profile', res.reason);
++    };
++    return (
++      <div className="page">
++        <div className="card">
++          <Empty icon={<Bike size={24} />}>
++            <p style={{ marginBottom: 12 }}>Your rider profile isn't in the current data (the demo was probably restored).</p>
++            <button className="btn btn-primary" onClick={recreate}><UserPlus size={15} /> Restore my rider profile</button>
++          </Empty>
++        </div>
++      </div>
++    );
++  }
++
++  const mine = state.assignments.filter((a) => a.riderId === rider.id);
++  const active = mine.filter((a) => ACTIVE_STATUSES.includes(a.status));
++  const past = mine.filter((a) => !ACTIVE_STATUSES.includes(a.status)).slice(0, 12);
++
++  return (
++    <div className="page">
++      <div className="page-head">
++        <div>
++          <h1>My deliveries</h1>
++          <p>New jobs appear here when the dispatch team assigns you. Acknowledge within {state.settings.ackTimeoutSecs} seconds, or the job is passed to another rider.</p>
++        </div>
++      </div>
++      <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', alignItems: 'start' }} id="rider-grid">
++        <RiderCard rider={rider} />
++        <div className="stack">
++          <div className="card">
++            <div className="card-head"><h3>Current jobs</h3><span className="sub">{active.length} active</span></div>
++            <AssignmentTable assignments={active} now={now} emptyText="No jobs right now. Stay available and new deliveries will show up here." />
++          </div>
++          <div className="card">
++            <div className="card-head"><h3>Past jobs</h3></div>
++            {past.length === 0 ? <Empty>No completed jobs yet</Empty> : (
++              <div className="table-wrap">
++                <table className="table">
++                  <thead><tr><th>Job</th><th>Shelter</th><th>Cargo</th><th>Outcome</th></tr></thead>
++                  <tbody>
++                    {past.map((a) => (
++                      <tr key={a.id}>
++                        <td><b>{a.id}</b><div className="cell-sub mono">{a.batchId}</div></td>
++                        <td>{shelterLabel(state.shelters.find((s) => s.id === a.shelterId))}</td>
++                        <td className="mono">{a.qty} {a.unit}</td>
++                        <td><StatusBadge status={a.status} /></td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </table>
++              </div>
++            )}
++          </div>
++        </div>
++      </div>
++      <style>{`@media (max-width: 1080px) { #rider-grid { grid-template-columns: minmax(0,1fr) !important; } }`}</style>
++    </div>
++  );
++}
+diff --git a/src/pages/Shelters.jsx b/src/pages/Shelters.jsx
+index aabbbb5..e8b4172 100644
+--- a/src/pages/Shelters.jsx
++++ b/src/pages/Shelters.jsx
+@@ -1,9 +1,12 @@
+ import { useApp } from '../context/AppContext.jsx';
++import { useAuth } from '../context/AuthContext.jsx';
+ import ShelterCard from '../components/ShelterCard.jsx';
+ import { RESOURCES } from '../data/constants.js';
+ 
+ export default function Shelters() {
+   const { state } = useApp();
++  const { user } = useAuth();
++  const shelters = [...state.shelters].sort((a, b) => (b.id === user.shelterId) - (a.id === user.shelterId));
+   const open = state.shelters.filter((s) => s.status === 'Open').length;
+   return (
+     <div className="page">
+@@ -24,7 +27,7 @@ export default function Shelters() {
+         </div>
+       </div>
+       <div className="entity-grid">
+-        {state.shelters.map((sh) => <ShelterCard key={sh.id} shelter={sh} />)}
++        {shelters.map((sh) => <ShelterCard key={sh.id} shelter={sh} />)}
+       </div>
+     </div>
+   );
+diff --git a/src/services/authService.js b/src/services/authService.js
+new file mode 100644
+index 0000000..63bf454
+--- /dev/null
++++ b/src/services/authService.js
+@@ -0,0 +1,190 @@
++// =====================================================================
++// Prototype sign-in for RescueFlow.
++// Accounts are stored in this browser's LocalStorage, separate from the
++// operations data, so "Restore demo" never deletes anyone's account.
++// Passwords are stored as SHA-256 hashes, never as plain text.
++// NOTE: this is a hackathon prototype. Real deployments need a server-side
++// login (e.g. OAuth or a hosted auth provider).
++// =====================================================================
++
++const USERS_KEY = 'rescueflow-users';
++const SESSION_KEY = 'rescueflow-session';
++
++const ALL_PAGES = ['overview', 'donations', 'riders', 'shelters', 'dispatch', 'simulator', 'logs'];
++
++export const ROLES = {
++  admin: {
++    label: 'Operations admin',
++    short: 'Admin',
++    description: 'Runs dispatch, manages everything, triggers simulations',
++    pages: ALL_PAGES,
++  },
++  donor: {
++    label: 'Donor',
++    short: 'Donor',
++    description: 'Lists surplus food and supplies, tracks where it went',
++    pages: ['overview', 'donations'],
++  },
++  rider: {
++    label: 'Volunteer rider',
++    short: 'Rider',
++    description: 'Accepts deliveries, confirms pickup and drop-off',
++    pages: ['overview', 'mydeliveries'],
++  },
++  shelter: {
++    label: 'Shelter coordinator',
++    short: 'Shelter',
++    description: 'Updates shelter demand, resources and status',
++    pages: ['overview', 'shelters', 'logs'],
++  },
++};
++
++// Demo accounts so judges can try every role in one click.
++export const DEMO_ACCOUNTS = [
++  { id: 'U-admin', role: 'admin', name: 'Ops Admin', email: 'admin@rescueflow.org', password: 'admin123', passwordHash: '19caf3b707e521e31b957151b16bfa8999d6fd4a69d0f631c0f8666d910459fc' },
++  { id: 'U-donor', role: 'donor', name: 'Anita Rao', email: 'donor@sunrise.org', password: 'donor123', donorName: 'Sunrise Banquet Hall', passwordHash: '9b3eefb2c61af6a0e8a221f94751dcbcf5ca4dfac1ba84baaaf9795711a4cc13' },
++  { id: 'U-rider', role: 'rider', name: 'Priya Sharma', email: 'rider@rescueflow.org', password: 'rider123', riderId: 'R-101', passwordHash: '644fc788a94953963941d0b505fd2ebb182c8d87475f53087d2d3e73d94d5543' },
++  { id: 'U-shelter', role: 'shelter', name: 'Joseph Mathew', email: 'shelter@riverside.org', password: 'shelter123', shelterId: 'SH-A', passwordHash: '89692ecf00341dca2382ba1155dcd8a2a9b64c5d6f1122e631dce4d2d989bdd2' },
++];
++
++// ---------- SHA-256 (small pure-JS version, works on http and https) ----------
++export function sha256(text) {
++  const K = [];
++  const H = [];
++  let n = 2;
++  let found = 0;
++  const frac = (x) => ((x - Math.floor(x)) * 0x100000000) | 0;
++  while (found < 64) {
++    let prime = true;
++    for (let f = 2; f * f <= n; f += 1) if (n % f === 0) { prime = false; break; }
++    if (prime) {
++      if (found < 8) H[found] = frac(Math.pow(n, 1 / 2));
++      K[found] = frac(Math.pow(n, 1 / 3));
++      found += 1;
++    }
++    n += 1;
++  }
++  const bytes = new TextEncoder().encode(text);
++  const bitLen = bytes.length * 8;
++  const padded = new Uint8Array(((bytes.length + 9 + 63) >> 6) << 6);
++  padded.set(bytes);
++  padded[bytes.length] = 0x80;
++  const view = new DataView(padded.buffer);
++  view.setUint32(padded.length - 4, bitLen >>> 0);
++  view.setUint32(padded.length - 8, Math.floor(bitLen / 0x100000000));
++  const w = new Int32Array(64);
++  const rotr = (x, r) => (x >>> r) | (x << (32 - r));
++  for (let i = 0; i < padded.length; i += 64) {
++    for (let t = 0; t < 16; t += 1) w[t] = view.getInt32(i + t * 4);
++    for (let t = 16; t < 64; t += 1) {
++      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
++      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
++      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
++    }
++    let [a, b, c, d, e, f, g, h] = H;
++    for (let t = 0; t < 64; t += 1) {
++      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
++      const ch = (e & f) ^ (~e & g);
++      const t1 = (h + S1 + ch + K[t] + w[t]) | 0;
++      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
++      const maj = (a & b) ^ (a & c) ^ (b & c);
++      const t2 = (S0 + maj) | 0;
++      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
++    }
++    H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
++    H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
++  }
++  return H.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('');
++}
++
++const normalizeEmail = (e) => String(e || '').trim().toLowerCase();
++export const hashPassword = (email, password) => sha256(`${normalizeEmail(email)}:${password}`);
++
++// ---------- Storage ----------
++function read(key) {
++  try {
++    const raw = localStorage.getItem(key);
++    return raw ? JSON.parse(raw) : null;
++  } catch {
++    return null;
++  }
++}
++function write(key, value) {
++  try {
++    if (value === null) localStorage.removeItem(key);
++    else localStorage.setItem(key, JSON.stringify(value));
++  } catch {
++    /* storage blocked: sign-in still works for this tab */
++  }
++}
++
++let memoryUsers = null;
++export function loadUsers() {
++  const stored = read(USERS_KEY) ?? memoryUsers ?? [];
++  // Demo accounts always exist (and can't be overwritten)
++  const custom = stored.filter((u) => !DEMO_ACCOUNTS.some((d) => d.id === u.id));
++  return [...DEMO_ACCOUNTS.map(({ password, ...u }) => u), ...custom];
++}
++function saveCustomUsers(users) {
++  const custom = users.filter((u) => !DEMO_ACCOUNTS.some((d) => d.id === u.id));
++  memoryUsers = custom;
++  write(USERS_KEY, custom);
++}
++
++export function loadSession() {
++  const s = read(SESSION_KEY);
++  if (!s) return null;
++  return loadUsers().find((u) => u.id === s.userId) ?? null;
++}
++export function saveSession(user) {
++  write(SESSION_KEY, user ? { userId: user.id, at: Date.now() } : null);
++}
++
++// ---------- Sign in / sign up ----------
++export function login(email, password) {
++  const e = normalizeEmail(email);
++  if (!e || !password) return { ok: false, reason: 'Enter your email and password' };
++  const user = loadUsers().find((u) => u.email === e);
++  if (!user || user.passwordHash !== hashPassword(e, password)) {
++    return { ok: false, reason: 'Email or password is incorrect' };
++  }
++  return { ok: true, user };
++}
++
++export function validateSignup(form) {
++  const errors = [];
++  const email = normalizeEmail(form.email);
++  if (!form.name?.trim()) errors.push('Enter your full name');
++  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push('Enter a valid email address');
++  else if (loadUsers().some((u) => u.email === email)) errors.push('An account with this email already exists — sign in instead');
++  if (!form.password || form.password.length < 6) errors.push('Password must be at least 6 characters');
++  if (form.password !== form.confirm) errors.push('Passwords do not match');
++  if (!ROLES[form.role] || form.role === 'admin') errors.push('Choose donor, volunteer rider or shelter coordinator');
++  if (form.role === 'donor' && !form.donorName?.trim()) errors.push('Enter your organisation name');
++  if (form.role === 'shelter' && !form.shelterId) errors.push('Choose the shelter you coordinate');
++  if (form.role === 'rider') {
++    const cap = Number(form.capacity);
++    if (!Number.isInteger(cap) || cap <= 0 || cap > 500) errors.push('Carrying capacity must be a whole number between 1 and 500');
++  }
++  return errors;
++}
++
++// riderId must already be created in app data for rider accounts
++export function createAccount(form, extra = {}) {
++  const email = normalizeEmail(form.email);
++  const user = {
++    id: `U-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
++    role: form.role,
++    name: form.name.trim(),
++    email,
++    passwordHash: hashPassword(email, form.password),
++    createdAt: Date.now(),
++    ...extra,
++  };
++  saveCustomUsers([...loadUsers(), user]);
++  return user;
++}
++
++export function canAccess(user, page) {
++  return !!user && ROLES[user.role]?.pages.includes(page);
++}
+-- 
+2.43.0
+
